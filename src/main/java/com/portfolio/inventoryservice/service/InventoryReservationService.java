@@ -1,20 +1,27 @@
 package com.portfolio.inventoryservice.service;
 
+import com.portfolio.inventoryservice.event.InventoryResultEvent;
 import com.portfolio.inventoryservice.event.OrderCreatedEvent;
+import com.portfolio.inventoryservice.exception.InsufficientStockException;
 import com.portfolio.inventoryservice.exception.ProductNotFoundException;
 import com.portfolio.inventoryservice.persistence.entity.InventoryItemEntity;
 import com.portfolio.inventoryservice.persistence.entity.InventoryReservationEntity;
+import com.portfolio.inventoryservice.persistence.entity.OutboxEventEntity;
 import com.portfolio.inventoryservice.persistence.entity.ProcessedEventEntity;
 import com.portfolio.inventoryservice.persistence.repository.InventoryItemRepository;
 import com.portfolio.inventoryservice.persistence.repository.InventoryReservationRepository;
+import com.portfolio.inventoryservice.persistence.repository.OutboxEventRepository;
 import com.portfolio.inventoryservice.persistence.repository.ProcessedEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
-import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 
 @Service
@@ -29,17 +36,23 @@ public class InventoryReservationService {
     private final InventoryReservationRepository
             inventoryReservationRepository;
     private final ProcessedEventRepository processedEventRepository;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     public InventoryReservationService(
             InventoryItemRepository inventoryItemRepository,
             InventoryReservationRepository
                     inventoryReservationRepository,
-            ProcessedEventRepository processedEventRepository
+            ProcessedEventRepository processedEventRepository,
+            OutboxEventRepository outboxEventRepository,
+            ObjectMapper objectMapper
     ) {
         this.inventoryItemRepository = inventoryItemRepository;
         this.inventoryReservationRepository =
                 inventoryReservationRepository;
         this.processedEventRepository = processedEventRepository;
+        this.outboxEventRepository = outboxEventRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Transactional
@@ -49,11 +62,28 @@ public class InventoryReservationService {
             return;
         }
 
-        event.items().stream()
-                .sorted(Comparator.comparing(
-                        OrderCreatedEvent.Item::productId
-                ))
-                .forEach(item -> reserve(event.orderId(), item));
+        InventoryResultEvent resultEvent;
+
+        try {
+            reserveAll(event);
+
+            resultEvent = createResult(
+                    event.orderId(),
+                    InventoryResultEvent.Result.RESERVED,
+                    null
+            );
+        } catch (
+                ProductNotFoundException
+                | InsufficientStockException exception
+        ) {
+            resultEvent = createResult(
+                    event.orderId(),
+                    InventoryResultEvent.Result.REJECTED,
+                    exception.getMessage()
+            );
+        }
+
+        storeResult(resultEvent);
 
         processedEventRepository.save(
                 new ProcessedEventEntity(
@@ -63,34 +93,116 @@ public class InventoryReservationService {
                 )
         );
 
-        log.info("Reserved inventory for order {} from event {}", event.orderId(), event.eventId());
+        log.info(
+                "Inventory result for order {}: {}",
+                event.orderId(),
+                resultEvent.result()
+        );
     }
 
-    private void reserve(
-            UUID orderId,
-            OrderCreatedEvent.Item requestedItem
+    private void reserveAll(OrderCreatedEvent event) {
+        Map<String, Integer> requestedQuantities =
+                aggregateQuantities(event);
+
+        Map<String, InventoryItemEntity> lockedItems =
+                new LinkedHashMap<>();
+
+        requestedQuantities.forEach((productId, quantity) -> {
+            InventoryItemEntity item = inventoryItemRepository
+                    .findByProductIdForUpdate(productId)
+                    .orElseThrow(() ->
+                            new ProductNotFoundException(productId)
+                    );
+
+            lockedItems.put(productId, item);
+        });
+
+        requestedQuantities.forEach((productId, quantity) -> {
+            InventoryItemEntity item = lockedItems.get(productId);
+
+            if (item.getAvailableQuantity() < quantity) {
+                throw new InsufficientStockException(
+                        productId,
+                        quantity,
+                        item.getAvailableQuantity()
+                );
+            }
+        });
+
+        requestedQuantities.forEach((productId, quantity) -> {
+            InventoryItemEntity item = lockedItems.get(productId);
+
+            item.reserve(quantity);
+
+            inventoryReservationRepository.save(
+                    new InventoryReservationEntity(
+                            UUID.randomUUID(),
+                            event.orderId(),
+                            productId,
+                            quantity,
+                            "RESERVED",
+                            Instant.now()
+                    )
+            );
+        });
+    }
+
+    private Map<String, Integer> aggregateQuantities(
+            OrderCreatedEvent event
     ) {
-        InventoryItemEntity inventoryItem =
-                inventoryItemRepository
-                        .findByProductIdForUpdate(
-                                requestedItem.productId()
-                        )
-                        .orElseThrow(() ->
-                                new ProductNotFoundException(
-                                        requestedItem.productId()
-                                )
-                        );
+        Map<String, Integer> quantities = new TreeMap<>();
 
-        inventoryItem.reserve(requestedItem.quantity());
+        event.items().forEach(item ->
+                quantities.merge(
+                        item.productId(),
+                        item.quantity(),
+                        Integer::sum
+                )
+        );
 
-        inventoryReservationRepository.save(
-                new InventoryReservationEntity(
-                        UUID.randomUUID(),
-                        orderId,
-                        requestedItem.productId(),
-                        requestedItem.quantity(),
-                        "RESERVED",
-                        Instant.now()
+        return quantities;
+    }
+
+    private InventoryResultEvent createResult(
+            UUID orderId,
+            InventoryResultEvent.Result result,
+            String reason
+    ) {
+        return new InventoryResultEvent(
+                UUID.randomUUID(),
+                orderId,
+                result,
+                reason,
+                Instant.now(),
+                1
+        );
+    }
+
+    private void storeResult(InventoryResultEvent event) {
+        String payload;
+
+        try {
+            payload = objectMapper.writeValueAsString(event);
+        } catch (Exception exception) {
+            throw new IllegalStateException(
+                    "Failed to serialize inventory result",
+                    exception
+            );
+        }
+
+        String eventType = switch (event.result()) {
+            case RESERVED -> "InventoryReserved";
+            case REJECTED -> "InventoryRejected";
+        };
+
+        outboxEventRepository.save(
+                new OutboxEventEntity(
+                        event.eventId(),
+                        "ORDER",
+                        event.orderId(),
+                        eventType,
+                        payload,
+                        event.occurredAt()
                 )
         );
     }

@@ -16,4 +16,13 @@ public class KafkaTopicConfiguration {
                 .replicas(1)
                 .build();
     }
+
+    @Bean
+    public NewTopic inventoryEventsTopic() {
+        return TopicBuilder
+                .name("inventory-events")
+                .partitions(3)
+                .replicas(1)
+                .build();
+    }
 }

@@ -1,7 +1,5 @@
 package com.portfolio.inventoryservice.config;
 
-import com.portfolio.inventoryservice.exception.InsufficientStockException;
-import com.portfolio.inventoryservice.exception.ProductNotFoundException;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -41,9 +39,7 @@ public class KafkaErrorHandlingConfiguration {
                 );
 
         errorHandler.addNotRetryableExceptions(
-                IllegalArgumentException.class,
-                ProductNotFoundException.class,
-                InsufficientStockException.class
+                IllegalArgumentException.class
         );
 
         return errorHandler;
