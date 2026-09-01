@@ -12,4 +12,6 @@ public interface InventoryReservationRepository
     long countByOrderId(UUID orderId);
 
     List<InventoryReservationEntity> findAllByOrderIdAndStatusOrderByProductIdAsc(UUID orderId, String status);
+
+    List<InventoryReservationEntity> findAllByOrderId(UUID orderId);
 }

@@ -72,4 +72,8 @@ public class OutboxEventEntity {
     public String getPayload() {
         return payload;
     }
+
+    public String getEventType() {
+        return eventType;
+    }
 }
