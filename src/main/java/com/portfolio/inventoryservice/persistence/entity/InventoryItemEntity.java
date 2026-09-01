@@ -59,4 +59,24 @@ public class InventoryItemEntity {
     public int getReservedQuantity() {
         return reservedQuantity;
     }
+
+    public void release(int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException(
+                    "Release quantity must be positive"
+            );
+        }
+
+        if (reservedQuantity < quantity) {
+            throw new IllegalStateException(
+                    "Cannot release " + quantity
+                            + " units of product " + productId
+                            + "; only " + reservedQuantity
+                            + " units are reserved"
+            );
+        }
+
+        reservedQuantity -= quantity;
+        availableQuantity += quantity;
+    }
 }

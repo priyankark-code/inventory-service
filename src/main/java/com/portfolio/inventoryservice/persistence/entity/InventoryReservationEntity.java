@@ -69,4 +69,20 @@ public class InventoryReservationEntity {
     public String getStatus() {
         return status;
     }
+
+    public void release() {
+        if ("RELEASED".equals(status)) {
+            return;
+        }
+
+        if (!"RESERVED".equals(status)) {
+            throw new IllegalStateException(
+                    "Reservation " + id
+                            + " cannot be released from status "
+                            + status
+            );
+        }
+
+        status = "RELEASED";
+    }
 }
